@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+# ipwndfu: open-source jailbreaking tool for older iOS devices
+# Author: axi0mX
+
+import binascii, datetime, getopt, hashlib, struct, sys, time
+import dfu, nor, utilities
+import alloc8, image3_24Kpwn
+from dfuexec import *
+
+def print_help():
+    print('USAGE: ipwndfu [options]')
+    print('Interact with an iOS device in DFU Mode.\n')
+    print('Basic options:')
+    print('  -x\t\t\t\tinstall alloc8 exploit to NOR')
+    print('Advanced options:')
+    print('  --dump-nor=file\t\tdump NOR to file')
+    print('  --flash-nor=file\t\tflash NOR (header and firmware only) from file')
+    print('  --remove-24kpwn\t\tremove 24Kpwn exploit from NOR')
+    print('  --remove-alloc8\t\tremove alloc8 exploit from NOR')
+
+if __name__ == '__main__':
+    try:
+        advanced = ['dump-nor=', 'flash-nor=', 'remove-24kpwn', 'remove-alloc8']
+        opts, args = getopt.getopt(sys.argv[1:], 'x', advanced)
+    except getopt.GetoptError:
+        print('ERROR: Invalid arguments provided.')
+        print_help()
+        sys.exit(2)
+
+    if len(opts) == 0:
+        print_help()
+        sys.exit(2)
+
+    for opt, arg in opts:
+        if opt == '-x':
+            device = PwnedDFUDevice()
+
+            if device.config.version == '359.3':
+                print('WARNING: iPhone 3GS (old bootrom) was detected. Use 24Kpwn exploit for faster boots, alloc8 exploit is for testing purposes only.')
+                input("Press ENTER to continue.")
+
+            print('Installing alloc8 exploit to NOR.')
+
+            dump = device.nor_dump(saveBackup=False)
+            nor_data = nor.NorData(dump)
+
+            for byte in nor_data.parts[1]:
+                if byte != 0:
+                    print('ERROR: Bytes following IMG2 header in NOR are not zero. alloc8 exploit was likely previously installed. Exiting.')
+                    sys.exit(1)
+
+            if len(nor_data.images) == 0 or len(nor_data.images[0]) < 0x24000:
+                print('ERROR: 24Kpwn LLB was not found. You must restore a custom 24Kpwn IPSW before using this exploit.')
+                sys.exit(1)
+
+            print('Preparing modified NOR with alloc8 exploit.')
+            nor_data.images[0] = image3_24Kpwn.remove_exploit(nor_data.images[0])
+            new_nor = alloc8.exploit(nor_data, device.config.version)
+
+            device.flash_nor(new_nor.dump())
+
+        if opt == '--dump-nor':
+            device = PwnedDFUDevice()
+            nor_data = device.nor_dump(saveBackup=False)
+            with open(arg, 'wb') as f:
+                f.write(nor_data)
+            print('NOR dumped to file: %s' % arg)
+
+        if opt == '--flash-nor':
+            print('Flashing NOR from file:', arg)
+            with open(arg, 'rb') as f:
+                new_nor = f.read()
+            if new_nor[:4] != b'2GMI':  # reversed 'IMG2'
+                print('ERROR: Bad IMG2 header magic. This is not a valid NOR. Exiting.')
+                sys.exit(1)
+
+            device = PwnedDFUDevice()
+            device.nor_dump(saveBackup=True)
+            device.flash_nor(new_nor)
+
+        if opt == '--remove-24kpwn':
+            device = PwnedDFUDevice()
+
+            print('WARNING: This feature is for researchers only. Device will probably not boot into iOS until it is restored in iTunes.')
+            input("Press ENTER to continue.")
+
+            dump = device.nor_dump(saveBackup=True)
+            nor_data = nor.NorData(dump)
+
+            if len(nor_data.images) == 0 or len(nor_data.images[0]) <= 0x24000:
+                print('ERROR: LLB is not oversized. It seems that 24Kpwn exploit is not installed. Exiting.')
+                sys.exit(1)
+
+            print('Preparing modified NOR without 24Kpwn exploit.')
+            nor_data.images[0] = image3_24Kpwn.remove_exploit(nor_data.images[0])
+            device.flash_nor(nor_data.dump())
+
+        if opt == '--remove-alloc8':
+            device = PwnedDFUDevice()
+
+            print('WARNING: This feature is for researchers only. Device will probably not boot into iOS until it is restored in iTunes.')
+            input("Press ENTER to continue.")
+
+            dump = device.nor_dump(saveBackup=True)
+            nor_data = nor.NorData(dump)
+
+            if len(nor_data.images) < 700:
+                print('ERROR: It seems that alloc8 exploit is not installed. There are less than 700 images in NOR. Exiting.')
+                sys.exit(1)
+
+            print('Preparing modified NOR without alloc8 exploit.')
+            new_nor = alloc8.remove_exploit(nor_data)
+            device.flash_nor(new_nor.dump())
